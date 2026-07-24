@@ -1,15 +1,18 @@
 from datetime import date
 from pathlib import Path
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from core.excel_store import ExcelStore,to_numeric
+
+from core.excel_store import ExcelStore, to_numeric
 
 st.set_page_config(page_title='ScrumMaster Governance Pro',page_icon='📊',layout='wide')
 st.markdown('''<style>
 :root{--navy:#123B63;--navy2:#0B2742;--red:#C62828;--green:#2E7D32;--bg:#F4F7FB;--text:#102A43}
 .stApp{background:var(--bg)} [data-testid="stSidebar"]{background:linear-gradient(180deg,var(--navy2),var(--navy))}
+
 [data-testid="stSidebar"] *{color:white}.block-container{padding-top:1rem;max-width:1800px}.hdr{background:linear-gradient(100deg,var(--navy2),var(--navy));color:white;padding:20px 30px;border-radius:16px;margin-bottom:18px;box-shadow:0 8px 24px #123b6328}.card{background:white;border-radius:12px;padding:16px;border-left:6px solid var(--navy);box-shadow:0 4px 14px #102a4314;min-height:110px}.red{border-left-color:var(--red)}.green{border-left-color:var(--green)}.amber{border-left-color:#F9A825}.lbl{color:#627D98;font-size:.8rem;text-transform:uppercase;font-weight:700}.val{color:var(--text);font-size:1.75rem;font-weight:800;margin-top:8px}.sub{color:#627D98;font-size:.85rem}.stDataFrame,.stDataEditor{background:white;border-radius:12px;box-shadow:0 3px 12px #102a4312;padding:4px}</style>''',unsafe_allow_html=True)
 ROOT=Path(__file__).resolve().parent; TEMPLATE=ROOT/'templates'/'MPP_Upload_Template.xlsx'; store=ExcelStore(); store.ensure_app_sheets()
 def hdr(t,s):st.markdown(f'<div class="hdr"><h2 style="margin:0">{t}</h2><div style="opacity:.86;margin-top:7px">{s}</div></div>',unsafe_allow_html=True)
@@ -47,11 +50,68 @@ def normalize_upload(raw):
     raw=raw[cols];raw=assign_task_ids(raw,store.read_sheet('App Tasks'))
     for c in ['Start Date','End Date','Last Updated']:raw[c]=pd.to_datetime(raw[c],errors='coerce')
     raw['Progress %']=pd.to_numeric(raw['Progress %'],errors='coerce').fillna(0).clip(0,100);raw['Duration Days']=(raw['End Date']-raw['Start Date']).dt.days+1;raw['Last Updated']=pd.Timestamp(date.today());return raw
+def prepare_master_editor(df):
+    d=df.copy()
+
+    # Streamlit data_editor requires configured columns to use compatible dtypes.
+    if 'Active' in d.columns:
+        d['Active']=d['Active'].fillna(True).astype(bool)
+
+    for c in ['Start Date','End Date']:
+        if c in d.columns:
+            d[c]=pd.to_datetime(d[c],errors='coerce')
+
+    for c in ['Sort Order']:
+        if c in d.columns:
+            d[c]=pd.to_numeric(d[c],errors='coerce').astype('Int64')
+
+    # IDs and other master-data text columns must remain strings, not mixed numeric/object.
+    for c in d.columns:
+        if c not in ['Active','Start Date','End Date','Sort Order']:
+            d[c]=d[c].fillna('').astype(str)
+
+    return d
+
 def save_master(sheet,id_col,prefix,edited):
-    d=edited.copy();d=d[~d['_Delete'].fillna(False)].drop(columns=['_Delete']);existing=store.read_sheet(sheet)
+    d=edited.copy()
+    d=d[~d['_Delete'].fillna(False)].drop(columns=['_Delete'])
+
+    # Ignore completely blank rows created by the dynamic editor.
+    business_cols=[c for c in d.columns if c not in [id_col,'Active']]
+    if business_cols:
+        non_blank=d[business_cols].apply(
+            lambda row:any(text(v) for v in row),
+            axis=1
+        )
+        d=d[non_blank].copy()
+
+    existing=store.read_sheet(sheet)
+
+    # Generate stable IDs without duplicating values during the same save.
+    used=set(existing.get(id_col,pd.Series(dtype=str)).dropna().astype(str))
+    next_number=0
+    for value in used:
+        digits=''.join(ch for ch in value if ch.isdigit())
+        if digits:
+            next_number=max(next_number,int(digits))
+
     for i in d.index:
-        if not text(d.at[i,id_col]):d.at[i,id_col]=store.next_id(pd.concat([existing,d]),id_col,prefix,3)
-    store.write_sheet(sheet,d);st.success('Saved successfully.');st.rerun()
+        current=text(d.at[i,id_col])
+        if not current:
+            next_number+=1
+            current=f'{prefix}-{next_number:03d}'
+            while current in used:
+                next_number+=1
+                current=f'{prefix}-{next_number:03d}'
+            d.at[i,id_col]=current
+        used.add(current)
+
+    if 'Active' in d.columns:
+        d['Active']=d['Active'].fillna(True).astype(bool)
+
+    store.write_sheet(sheet,d)
+    st.success('Saved successfully.')
+    st.rerun()
 
 with st.sidebar:
     st.markdown('## ScrumMaster Pro');st.caption('Delivery Governance Workspace')
@@ -73,11 +133,36 @@ elif page=='Master Data Management':
     tabs=st.tabs(['Projects','Epics','Sprints','Owners','Statuses','Priorities']);cfgs=[('App Projects','Project ID','PRJ'),('App Epics','Epic ID','EPC'),('App Sprints','Sprint ID','SPR'),('App Owners','Owner ID','OWN'),('App Statuses','Status ID','STS'),('App Priorities','Priority ID','PRI')]
     for tab,(sheet,id_col,prefix) in zip(tabs,cfgs):
         with tab:
-            d=store.read_sheet(sheet);v=d.copy();v.insert(0,'_Delete',False);cc={'_Delete':st.column_config.CheckboxColumn('Delete'),id_col:st.column_config.TextColumn(id_col,disabled=True)}
-            if 'Active' in v:cc['Active']=st.column_config.CheckboxColumn('Active')
+            d=store.read_sheet(sheet)
+            v=prepare_master_editor(d)
+            v.insert(0,'_Delete',False)
+
+            cc={
+                '_Delete':st.column_config.CheckboxColumn('Delete',default=False),
+                id_col:st.column_config.TextColumn(id_col,disabled=True),
+            }
+
+            if 'Active' in v.columns:
+                cc['Active']=st.column_config.CheckboxColumn('Active',default=True)
+
             for c in ['Start Date','End Date']:
-                if c in v:cc[c]=st.column_config.DateColumn(c,format='DD-MMM-YYYY')
-            e=st.data_editor(v,use_container_width=True,height=470,hide_index=True,num_rows='dynamic',column_config=cc,key=sheet)
+                if c in v.columns:
+                    cc[c]=st.column_config.DateColumn(c,format='DD-MMM-YYYY')
+
+            if 'Sort Order' in v.columns:
+                cc['Sort Order']=st.column_config.NumberColumn(
+                    'Sort Order',min_value=0,step=1,format='%d'
+                )
+
+            e=st.data_editor(
+                v,
+                use_container_width=True,
+                height=470,
+                hide_index=True,
+                num_rows='dynamic',
+                column_config=cc,
+                key=f'master_{sheet}',
+            )
             st.caption('Add a blank row to create. Edit a row to update. Tick Delete and save to remove.')
             if st.button('💾 Save '+sheet.replace('App ',''),type='primary',key='save'+sheet):save_master(sheet,id_col,prefix,e)
 elif page=='MPP / Delivery Plan':
