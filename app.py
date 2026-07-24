@@ -72,6 +72,43 @@ def prepare_master_editor(df):
 
     return d
 
+def prepare_mpp_editor(df):
+    d=df.copy()
+
+    # Ensure every configured column has a compatible dtype for Streamlit data_editor.
+    text_columns=[
+        'Task ID','Project','Epic','Sprint','Task','Owner','Peer QA',
+        'Status','Priority','Risk','Dependency','Milestone','Comments'
+    ]
+    date_columns=['Start Date','End Date','Last Updated']
+    numeric_columns=['Duration Days','Progress %','Expected %','Variance %']
+
+    for c in text_columns:
+        if c in d.columns:
+            d[c]=d[c].fillna('').astype(str)
+
+    for c in date_columns:
+        if c in d.columns:
+            d[c]=pd.to_datetime(d[c],errors='coerce')
+
+    for c in numeric_columns:
+        if c in d.columns:
+            d[c]=pd.to_numeric(d[c],errors='coerce')
+
+    if 'Progress %' in d.columns:
+        d['Progress %']=d['Progress %'].fillna(0).clip(0,100).astype(float)
+
+    if 'Duration Days' in d.columns:
+        d['Duration Days']=d['Duration Days'].astype('Float64')
+
+    if 'Expected %' in d.columns:
+        d['Expected %']=d['Expected %'].astype('Float64')
+
+    if 'Variance %' in d.columns:
+        d['Variance %']=d['Variance %'].astype('Float64')
+
+    return d
+
 def save_master(sheet,id_col,prefix,edited):
     d=edited.copy()
     d=d[~d['_Delete'].fillna(False)].drop(columns=['_Delete'])
@@ -189,12 +226,53 @@ elif page=='MPP / Delivery Plan':
                         store.write_sheet('App Tasks',res);st.success('Imported successfully.');st.rerun()
                 except Exception as ex:st.error(f'Upload could not be processed: {ex}')
     with plan:
-        v=tasks.copy();v.insert(0,'Delete',False);cc={'Delete':st.column_config.CheckboxColumn('Delete'),'Task ID':st.column_config.TextColumn('Task ID',disabled=True,width='small'),'Task':st.column_config.TextColumn('Task',required=True,width='large'),'Status':st.column_config.SelectboxColumn('Status',options=statuses),'Priority':st.column_config.SelectboxColumn('Priority',options=priorities),'Start Date':st.column_config.DateColumn('Start Date',format='DD-MMM-YYYY'),'End Date':st.column_config.DateColumn('End Date',format='DD-MMM-YYYY'),'Duration Days':st.column_config.NumberColumn('Duration',disabled=True),'Progress %':st.column_config.ProgressColumn('Progress %',min_value=0,max_value=100,format='%d%%'),'Expected %':st.column_config.NumberColumn('Expected %',disabled=True),'Variance %':st.column_config.NumberColumn('Variance %',disabled=True),'Risk':st.column_config.TextColumn('Risk',disabled=True),'Comments':st.column_config.TextColumn('Comments',width='large')}
-        if projects:cc['Project']=st.column_config.SelectboxColumn('Project',options=projects)
-        if epics:cc['Epic']=st.column_config.SelectboxColumn('Epic',options=epics)
-        if sprints:cc['Sprint']=st.column_config.SelectboxColumn('Sprint',options=sprints)
-        if owners:cc['Owner']=st.column_config.SelectboxColumn('Owner',options=owners);cc['Peer QA']=st.column_config.SelectboxColumn('Peer QA',options=['']+owners)
-        e=st.data_editor(v,use_container_width=True,height=620,hide_index=True,num_rows='dynamic',column_config=cc,key='mpp');work=e[~e['Delete'].fillna(False)].drop(columns=['Delete']);work=work[work['Task'].fillna('').astype(str).str.strip()!=''];bad=work[pd.to_datetime(work['End Date'],errors='coerce')<pd.to_datetime(work['Start Date'],errors='coerce')]
+        v=prepare_mpp_editor(tasks)
+        v.insert(0,'Delete',False)
+
+        cc={
+            'Delete':st.column_config.CheckboxColumn('Delete',default=False),
+            'Task ID':st.column_config.TextColumn('Task ID',disabled=True,width='small'),
+            'Task':st.column_config.TextColumn('Task',required=True,width='large'),
+            'Status':st.column_config.SelectboxColumn('Status',options=statuses),
+            'Priority':st.column_config.SelectboxColumn('Priority',options=priorities),
+            'Start Date':st.column_config.DateColumn('Start Date',format='DD-MMM-YYYY'),
+            'End Date':st.column_config.DateColumn('End Date',format='DD-MMM-YYYY'),
+            'Duration Days':st.column_config.NumberColumn('Duration',disabled=True,format='%.0f'),
+            'Progress %':st.column_config.ProgressColumn(
+                'Progress %',min_value=0,max_value=100,format='%.0f%%'
+            ),
+            'Expected %':st.column_config.NumberColumn('Expected %',disabled=True,format='%.1f'),
+            'Variance %':st.column_config.NumberColumn('Variance %',disabled=True,format='%.1f'),
+            'Risk':st.column_config.TextColumn('Risk',disabled=True),
+            'Comments':st.column_config.TextColumn('Comments',width='large'),
+        }
+
+        if projects:
+            cc['Project']=st.column_config.SelectboxColumn('Project',options=projects)
+        if epics:
+            cc['Epic']=st.column_config.SelectboxColumn('Epic',options=epics)
+        if sprints:
+            cc['Sprint']=st.column_config.SelectboxColumn('Sprint',options=sprints)
+        if owners:
+            cc['Owner']=st.column_config.SelectboxColumn('Owner',options=owners)
+            cc['Peer QA']=st.column_config.SelectboxColumn('Peer QA',options=['']+owners)
+
+        e=st.data_editor(
+            v,
+            use_container_width=True,
+            height=620,
+            hide_index=True,
+            num_rows='dynamic',
+            column_config=cc,
+            key='mpp',
+        )
+
+        work=e[~e['Delete'].fillna(False)].drop(columns=['Delete'])
+        work=work[work['Task'].fillna('').astype(str).str.strip()!='']
+        bad=work[
+            pd.to_datetime(work['End Date'],errors='coerce')
+            < pd.to_datetime(work['Start Date'],errors='coerce')
+        ]
         st.caption('Add a row to create; Task ID auto-generates. Edit to update. Tick Delete to remove.')
         if not bad.empty:st.error('End Date cannot be earlier than Start Date.')
         if st.button('💾 Save MPP Plan',type='primary',disabled=not bad.empty):
